@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import glob
@@ -6,13 +7,16 @@ from datetime import datetime, timedelta, time as dtime
 import pytz
 from instagrapi import Client
 
+# Force instant unbuffered output so Render logs appear in real time
+sys.stdout.reconfigure(line_buffering=True)
+
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-TIMEZONE = os.environ.get("TIMEZONE", "America/Chicago")  # e.g., America/New_York, America/Chicago
+TIMEZONE = os.environ.get("TIMEZONE", "America/Denver")
 IG_USERNAME = os.environ.get("IG_USERNAME", "the_david_skul")
-IG_SESSION_ID = os.environ.get("IG_SESSION_ID", "1545942443%3Ah89LNOZI9nvOnu%3A21%3AAYmSkhX9EqmfSGHbgUL4-fZPFnuMpBDeZSyPKPAChw")       # Paste your browser sessionid
-PROXY_URL = os.environ.get("PROXY_URL", "")               # e.g., http://user:pass@geo.proxy.com:port
+IG_SESSION_ID = os.environ.get("IG_SESSION_ID", "")
+PROXY_URL = os.environ.get("PROXY_URL", "")
 
 # Disk location on Render (/data if Render Persistent Disk is attached, else local)
 DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else ".")
@@ -48,8 +52,9 @@ def load_history():
 
 def mark_as_posted(filename, media_pk):
     history = load_history()
+    tz = pytz.timezone(TIMEZONE)
     history[filename] = {
-        "posted_at": datetime.now(pytz.timezone(TIMEZONE)).isoformat(),
+        "posted_at": datetime.now(tz).isoformat(),
         "media_pk": str(media_pk)
     }
     with open(HISTORY_FILE, "w") as f:
@@ -63,7 +68,6 @@ def get_client():
     if PROXY_URL:
         cl.set_proxy(PROXY_URL)
 
-    # Device fingerprint
     cl.set_device({
         "app_version": "340.0.0.35.106",
         "android_version": 34,
@@ -80,7 +84,7 @@ def get_client():
         "Instagram 340.0.0.35.106 Android (34/14.0; 480dpi; 1080x2400; samsung; SM-S928B; eureka; qcom; en_US; 620035106)"
     )
 
-    # Bypass deprecated Meta QE endpoints
+    # Bypass deprecated Meta QE endpoints returning 404
     orig_private_request = cl.private_request
     def safe_private_request(endpoint, *args, **kwargs):
         if "qe/expose" in endpoint or "qe/sync" in endpoint:
@@ -88,16 +92,19 @@ def get_client():
         return orig_private_request(endpoint, *args, **kwargs)
     cl.private_request = safe_private_request
 
-    # Check cached session on persistent disk
+    if hasattr(cl, "expose"):
+        cl.expose = lambda *args, **kwargs: True
+    if hasattr(cl, "qe_expose"):
+        cl.qe_expose = lambda *args, **kwargs: True
+
     if os.path.exists(SESSION_FILE):
         try:
             cl.load_settings(SESSION_FILE)
-            cl.get_timeline_feed()  # lightweight verification call
+            cl.get_timeline_feed()
             return cl
         except Exception:
             print("[*] Saved session expired. Re-authenticating...")
 
-    # Log in via Session ID
     if not IG_SESSION_ID:
         raise ValueError("Missing IG_SESSION_ID environment variable.")
 
@@ -109,19 +116,13 @@ def get_client():
 # 4. 30-DAY MON-SAT TIMELINE GENERATOR
 # ==========================================
 def build_even_distribution_schedule(image_files, tz):
-    """
-    Spreads len(image_files) evenly across the eligible posting minutes
-    (Mon-Sat, 10:00 to 18:30) within a 30-day window starting today.
-    """
     now = datetime.now(tz)
     total_days = 30
     
-    # Calculate daily active window in seconds (10:00 to 18:30 = 8.5 hrs = 30,600 sec)
     start_sec = (WINDOW_START_HOUR * 3600) + (WINDOW_START_MINUTE * 60)
     end_sec = (WINDOW_END_HOUR * 3600) + (WINDOW_END_MINUTE * 60)
     daily_active_seconds = end_sec - start_sec
 
-    # Collect all eligible days (0=Mon, 5=Sat, 6=Sun)
     eligible_dates = []
     base_date = now.date()
     for d in range(total_days):
@@ -135,7 +136,6 @@ def build_even_distribution_schedule(image_files, tz):
     if num_images == 0:
         return []
 
-    # Distribute slots evenly
     interval = total_active_seconds / num_images
     schedule_plan = []
 
@@ -168,7 +168,13 @@ def run_scheduler():
     print(f"Data directory: {DATA_DIR}")
     print("=" * 60)
 
-    # Collect images
+    # Diagnostic prints to inspect Render file structure
+    print(f"DEBUG: Root contents: {os.listdir(os.path.dirname(__file__))}")
+    if os.path.exists(IMAGE_FOLDER):
+        print(f"DEBUG: 'images' folder contents: {os.listdir(IMAGE_FOLDER)}")
+    else:
+        print("DEBUG: 'images' folder does not exist at all on Render!")
+
     all_images = sorted(
         glob.glob(os.path.join(IMAGE_FOLDER, "*.png")) +
         glob.glob(os.path.join(IMAGE_FOLDER, "*.jpg")) +
@@ -176,7 +182,7 @@ def run_scheduler():
     )
 
     if not all_images:
-        print(f"[-] No images found in '{IMAGE_FOLDER}'. Please commit images to GitHub.")
+        print(f"[-] No valid images found in '{IMAGE_FOLDER}'. Check file extensions (.png, .jpg).")
         while True:
             time.sleep(3600)
 
@@ -193,7 +199,6 @@ def run_scheduler():
         for scheduled_time, img_path in schedule_plan:
             filename = os.path.basename(img_path)
             
-            # Post if scheduled time has passed and not previously posted
             if now >= scheduled_time and filename not in history:
                 print(f"\n[*] Time reached for: {filename} ({scheduled_time.strftime('%Y-%m-%d %H:%M')})")
                 try:
@@ -205,7 +210,6 @@ def run_scheduler():
                 except Exception as e:
                     print(f"[-] Error uploading {filename}: {e}")
 
-        # Check every 60 seconds
         time.sleep(60)
 
 if __name__ == "__main__":
