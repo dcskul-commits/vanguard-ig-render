@@ -11,7 +11,7 @@ from instagrapi import Client
 # ==========================================
 TIMEZONE = os.environ.get("TIMEZONE", "America/Chicago")  # e.g., America/New_York, America/Chicago
 IG_USERNAME = os.environ.get("IG_USERNAME", "the_david_skul")
-IG_SESSION_ID = os.environ.get("IG_SESSION_ID", "")       # Paste your browser sessionid
+IG_SESSION_ID = os.environ.get("IG_SESSION_ID", "1545942443%3Ah89LNOZI9nvOnu%3A21%3AAYmSkhX9EqmfSGHbgUL4-fZPFnuMpBDeZSyPKPAChw")       # Paste your browser sessionid
 PROXY_URL = os.environ.get("PROXY_URL", "")               # e.g., http://user:pass@geo.proxy.com:port
 
 # Disk location on Render (/data if Render Persistent Disk is attached, else local)
