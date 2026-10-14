@@ -14,16 +14,11 @@ sys.stdout.reconfigure(line_buffering=True)
 # 1. CONFIGURATION
 # ==========================================
 TIMEZONE = os.environ.get("TIMEZONE", "America/Denver")
-IG_USERNAME = os.environ.get("IG_USERNAME", "the_david_skul")
-IG_SESSION_ID = os.environ.get("IG_SESSION_ID", "")
 PROXY_URL = os.environ.get("PROXY_URL", "")
 
 # Disk location on Render (/data if Render Persistent Disk is attached, else local)
 DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else ".")
 IMAGE_FOLDER = os.path.join(os.path.dirname(__file__), "images")
-
-SESSION_FILE = os.path.join(DATA_DIR, "ig_session.json")
-HISTORY_FILE = os.path.join(DATA_DIR, "ig_posting_history.json")
 
 # Posting Window: Monday-Saturday between 10:00 AM and 6:30 PM
 WINDOW_START_HOUR = 10
@@ -39,31 +34,58 @@ CAPTION = (
 )
 
 # ==========================================
-# 2. STATE PERSISTENCE
+# 2. MULTI-ACCOUNT SETUP
 # ==========================================
-def load_history():
-    if os.path.exists(HISTORY_FILE):
+ACCOUNTS = []
+
+# Primary Account (Account 1)
+acc1_user = os.environ.get("IG_USERNAME_1", "the_david_skul")
+acc1_session = os.environ.get("IG_SESSION_ID_1", os.environ.get("IG_SESSION_ID", "1545942443%3AaBJ2x7uwDFVdL7%3A25%3AAYlmBGCs3SPrFVoS8g2bMwlgFELeFLtPafMP73FpHQ"))
+if acc1_session:
+    ACCOUNTS.append({
+        "username": acc1_user,
+        "session_file": os.path.join(DATA_DIR, f"ig_session_{acc1_user}.json"),
+        "history_file": os.path.join(DATA_DIR, f"ig_posting_history_{acc1_user}.json"),
+        "session_id": acc1_session
+    })
+
+# Secondary Account (Account 2 - Optional)
+acc2_user = os.environ.get("IG_USERNAME_2", "vanguardbio")
+acc2_session = os.environ.get("IG_SESSION_ID_2", "43480923602%3AcHm1QLzvqem3s8%3A1%3AAYmODl5Xb-DmWPgapd5eXNRszXzDjptzoEA0OiWNeA")
+if acc2_session and acc2_user:
+    ACCOUNTS.append({
+        "username": acc2_user,
+        "session_file": os.path.join(DATA_DIR, f"ig_session_{acc2_user}.json"),
+        "history_file": os.path.join(DATA_DIR, f"ig_posting_history_{acc2_user}.json"),
+        "session_id": acc2_session
+    })
+
+# ==========================================
+# 3. STATE PERSISTENCE PER ACCOUNT
+# ==========================================
+def load_history(history_file):
+    if os.path.exists(history_file):
         try:
-            with open(HISTORY_FILE, "r") as f:
+            with open(history_file, "r") as f:
                 return json.load(f)
         except Exception:
             pass
     return {}
 
-def mark_as_posted(filename, media_pk):
-    history = load_history()
+def mark_as_posted(history_file, filename, media_pk):
+    history = load_history(history_file)
     tz = pytz.timezone(TIMEZONE)
     history[filename] = {
         "posted_at": datetime.now(tz).isoformat(),
         "media_pk": str(media_pk)
     }
-    with open(HISTORY_FILE, "w") as f:
+    with open(history_file, "w") as f:
         json.dump(history, f, indent=4)
 
 # ==========================================
-# 3. INSTAGRAM CLIENT INITIALIZATION
+# 4. INSTAGRAM CLIENT INITIALIZATION
 # ==========================================
-def get_client():
+def get_client_for_account(acc):
     cl = Client()
     if PROXY_URL:
         cl.set_proxy(PROXY_URL)
@@ -97,23 +119,23 @@ def get_client():
     if hasattr(cl, "qe_expose"):
         cl.qe_expose = lambda *args, **kwargs: True
 
-    if os.path.exists(SESSION_FILE):
+    if os.path.exists(acc["session_file"]):
         try:
-            cl.load_settings(SESSION_FILE)
+            cl.load_settings(acc["session_file"])
             cl.get_timeline_feed()
             return cl
         except Exception:
-            print("[*] Saved session expired. Re-authenticating...")
+            print(f"[*] Saved session expired for @{acc['username']}. Re-authenticating...")
 
-    if not IG_SESSION_ID:
-        raise ValueError("Missing IG_SESSION_ID environment variable.")
+    if not acc["session_id"]:
+        raise ValueError(f"Missing session ID for @{acc['username']}.")
 
-    cl.login_by_sessionid(IG_SESSION_ID)
-    cl.dump_settings(SESSION_FILE)
+    cl.login_by_sessionid(acc["session_id"])
+    cl.dump_settings(acc["session_file"])
     return cl
 
 # ==========================================
-# 4. 30-DAY MON-SAT TIMELINE GENERATOR
+# 5. 30-DAY MON-SAT TIMELINE GENERATOR
 # ==========================================
 def build_even_distribution_schedule(image_files, tz):
     now = datetime.now(tz)
@@ -158,18 +180,23 @@ def build_even_distribution_schedule(image_files, tz):
     return schedule_plan
 
 # ==========================================
-# 5. MAIN SCHEDULER LOOP
+# 6. MAIN SCHEDULER LOOP
 # ==========================================
 def run_scheduler():
     tz = pytz.timezone(TIMEZONE)
     print("=" * 60)
-    print("VanguardBIO 30-Day Render Instagram Poster Initialized")
+    print("VanguardBIO Multi-Account Render Instagram Poster Initialized")
     print(f"Timezone: {TIMEZONE} | Window: 10:00 AM - 6:30 PM (Mon-Sat)")
+    print(f"Active Accounts: {[acc['username'] for acc in ACCOUNTS]}")
     print(f"Data directory: {DATA_DIR}")
     print("=" * 60)
 
-    # Diagnostic prints to inspect Render file structure
-    print(f"DEBUG: Root contents: {os.listdir(os.path.dirname(__file__))}")
+    if not ACCOUNTS:
+        print("[-] ERROR: No Instagram accounts configured! Set IG_SESSION_ID_1.")
+        while True:
+            time.sleep(3600)
+
+    # Diagnostic checks
     if os.path.exists(IMAGE_FOLDER):
         print(f"DEBUG: 'images' folder contents: {os.listdir(IMAGE_FOLDER)}")
     else:
@@ -182,7 +209,7 @@ def run_scheduler():
     )
 
     if not all_images:
-        print(f"[-] No valid images found in '{IMAGE_FOLDER}'. Check file extensions (.png, .jpg).")
+        print(f"[-] No valid images found in '{IMAGE_FOLDER}'. Check folder structure on GitHub.")
         while True:
             time.sleep(3600)
 
@@ -194,21 +221,24 @@ def run_scheduler():
 
     while True:
         now = datetime.now(tz)
-        history = load_history()
 
         for scheduled_time, img_path in schedule_plan:
             filename = os.path.basename(img_path)
             
-            if now >= scheduled_time and filename not in history:
-                print(f"\n[*] Time reached for: {filename} ({scheduled_time.strftime('%Y-%m-%d %H:%M')})")
-                try:
-                    cl = get_client()
-                    print(f"[*] Uploading {filename}...")
-                    media = cl.photo_upload(img_path, CAPTION)
-                    mark_as_posted(filename, media.pk)
-                    print(f"[✓] Successfully published {filename} (Media ID: {media.pk})")
-                except Exception as e:
-                    print(f"[-] Error uploading {filename}: {e}")
+            if now >= scheduled_time:
+                # Check each configured account independently
+                for acc in ACCOUNTS:
+                    history = load_history(acc["history_file"])
+                    
+                    if filename not in history:
+                        print(f"\n[*] Time reached for: {filename} -> Publishing to @{acc['username']}")
+                        try:
+                            cl = get_client_for_account(acc)
+                            media = cl.photo_upload(img_path, CAPTION)
+                            mark_as_posted(acc["history_file"], filename, media.pk)
+                            print(f"[✓] Published {filename} to @{acc['username']} (Media ID: {media.pk})")
+                        except Exception as e:
+                            print(f"[-] Error publishing {filename} to @{acc['username']}: {e}")
 
         time.sleep(60)
 
